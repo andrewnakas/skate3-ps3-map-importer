@@ -61,8 +61,9 @@ public static class ImporterGroupCommand
                     return Fail($"group DIST folder is missing: {dist}");
                 if (!Path.GetFileName(dist).StartsWith("DIST_", StringComparison.OrdinalIgnoreCase))
                     return Fail($"group DIST folder must begin with DIST_: {dist}");
-                if (!seenDist.Add(dist))
-                    return Fail($"group contains the same DIST twice: {dist}");
+                // Several entries may share one DIST: that is how one world gets several
+                // Locations (the orchestrator copies the world once and merges the locators).
+                seenDist.Add(dist);
 
                 string display = string.IsNullOrWhiteSpace(m.DisplayName)
                     ? Path.GetFileName(dist)["DIST_".Length..]

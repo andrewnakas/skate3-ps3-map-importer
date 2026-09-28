@@ -4,7 +4,7 @@ $Engine = Join-Path $Here 'Skate3-PS3-to-X360-Map-Importer.ps1'
 $Installer = Join-Path $Here 'Install-Converted-Map-To-Recomp.ps1'
 $Worker = Join-Path $Here 'Skate3-PS3-to-X360-Map-Importer-GUI-Worker.ps1'
 $DlcManager = Join-Path $Here 'Manage-Installed-DLC-Maps.ps1'
-$GuiVersion = '1.16'
+$GuiVersion = '1.17'
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing

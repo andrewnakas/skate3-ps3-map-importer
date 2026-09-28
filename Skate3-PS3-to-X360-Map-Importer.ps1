@@ -24,7 +24,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ImporterVersion = "1.16"
+$ImporterVersion = "1.17"
 $ToolchainCacheVersion = "1.00"
 $SafeAutomaticLightmapRepair = $false
 $LegacyFullLightmapNeutralizationDisabled = $true
@@ -1304,7 +1304,54 @@ function Apply-XboxConverterFixes([string]$ConverterRoot, [string]$BuilderRoot) 
         [System.IO.File]::WriteAllText($programPath, $program, (New-Object System.Text.UTF8Encoding($false)))
     }
 
-    Write-Host "Applied Xbox conversion fixes: full mesh rebuild UV layout + RenderModel bounds + X360 material GUID remap + optional macro-overlay suppression + selective material-referenced lightmap texture repair + lossless default textures + grouped Locations helper." -ForegroundColor Green
+    # v1.17: formats the New San Van world uses that the pinned converter refused.
+    # 1) NORMAL elements packed as dec3n (VT6) — the same 11:11:10 packing the
+    #    decoder already inverts for tangents.
+    $decoderPath = Join-Path $transcodeDir "Ps3VertexDecoder.cs"
+    $decoder = ([System.IO.File]::ReadAllText($decoderPath)).Replace("`r`n", "`n")
+    if (-not $decoder.Contains("Some maps pack the NORMAL element as dec3n")) {
+        $anchor = "    private static Vector3 ReadVector3(ReadOnlySpan<byte> vertex, Ps3VertexElement e)`n    {`n"
+        if (-not $decoder.Contains($anchor)) { Fail "Pinned Ps3VertexDecoder no longer matches the expected ReadVector3 block." }
+        $decoder = $decoder.Replace($anchor, $anchor +
+            "        // Some maps pack the NORMAL element as dec3n, the same 11:11:10 layout tangents use.`n" +
+            "        if (e.VertexType == VtDec3n)`n" +
+            "            return DecodeDec3n(BinaryPrimitives.ReadUInt32BigEndian(vertex.Slice(e.Offset, 4)));`n")
+        [System.IO.File]::WriteAllText($decoderPath, $decoder, (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    # 2) Uncompressed linear A8R8G8B8 textures (GCM format 0xA5), re-encoded as
+    #    DXT5 so the DXT-only Xenos tiler can take them.
+    $argbSnippet = Join-Path $Here "ConverterPatch\TextureArgb8LinearToDxt5.snippet.cs"
+    if (-not (Test-Path $argbSnippet)) { Fail "Bundled converter patch is missing: $argbSnippet" }
+    $texturePath = Join-Path $transcodeDir "TextureObjectConverter.cs"
+    $texture = ([System.IO.File]::ReadAllText($texturePath)).Replace("`r`n", "`n")
+    if (-not $texture.Contains("public const byte Ps3Argb8Linear")) {
+        $convertAnchor = "        int mips = Math.Max(1, (int)info.MipCount);`n        if (flatGray)"
+        $blockAnchor = "    private static int BytesPerBlock(byte format) => format switch"
+        if (-not $texture.Contains($convertAnchor) -or -not $texture.Contains($blockAnchor)) {
+            Fail "Pinned TextureObjectConverter no longer matches the expected Convert/BytesPerBlock blocks."
+        }
+        $texture = $texture.Replace($convertAnchor,
+            "        if (info.Format == Ps3Argb8Linear)`n            (info, linearPayload) = Argb8LinearToDxt5(info, linearPayload);`n" + $convertAnchor)
+        $snippet = ([System.IO.File]::ReadAllText($argbSnippet)).Replace("`r`n", "`n")
+        $texture = $texture.Replace($blockAnchor, $snippet + $blockAnchor)
+        [System.IO.File]::WriteAllText($texturePath, $texture, (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    # 3) Print every refusal reason, grouped, instead of only the first eight.
+    $program = ([System.IO.File]::ReadAllText($programPath)).Replace("`r`n", "`n")
+    if (-not $program.Contains('refused x{g.Count()}')) {
+        $anchor = '    foreach (var reason in converted.Refused.Take(8)) Console.WriteLine($"  refused: {reason}");' + "`n"
+        if (-not $program.Contains($anchor)) { Fail "Pinned converter CLI no longer matches the expected refusal printout." }
+        $program = $program.Replace($anchor, $anchor +
+            "    foreach (var g in converted.Refused`n" +
+            '                 .GroupBy(r => System.Text.RegularExpressions.Regex.Replace(r, @"^.*? asset [0-9A-F]+: ", ""))' + "`n" +
+            "                 .OrderByDescending(g => g.Count()))`n" +
+            '        Console.WriteLine($"  refused x{g.Count()}: {g.Key}");' + "`n")
+        [System.IO.File]::WriteAllText($programPath, $program, (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    Write-Host "Applied Xbox conversion fixes: full mesh rebuild UV layout + RenderModel bounds + X360 material GUID remap + optional macro-overlay suppression + selective material-referenced lightmap texture repair + lossless default textures + grouped Locations helper + dec3n normals + linear ARGB8 textures." -ForegroundColor Green
 }
 
 function Write-ToolchainMarker {
@@ -1322,6 +1369,7 @@ AUTO_BLACK_TEXTURE_REPAIR_DISABLED=1
 SAFE_CTEXT_RGB_ONLY_REPAIR=1
 SECONDARY_MACRO_OVERLAY_REPAIR=1
 SELECTIVE_REFERENCED_LIGHTMAP_REPAIR=1
+DEC3N_NORMAL_ARGB8_TEXTURE_SHARED_DIST=1
 "@
     Set-Content -LiteralPath $ToolchainMarker -Value $markerText -Encoding ASCII
 }
@@ -1334,13 +1382,17 @@ function Prepare-Toolchain {
     $markerExists = Test-Path $ToolchainMarker
     $markerText = if ($markerExists) { Get-Content -LiteralPath $ToolchainMarker -Raw -ErrorAction SilentlyContinue } else { "" }
     $sourceReposReady = (Test-Path (Join-Path $ToolRoot ".git")) -and (Test-Path (Join-Path $ExternalRoot ".git"))
+    # Set-Content ends the marker's last line with CRLF, and .NET's multiline `$`
+    # does not match before `\r`. Without `\r?` the last flag never matched, so
+    # every run hard-reset and rebuilt the cached converter.
     $needsV105Upgrade = $markerExists -and (
-        $markerText -notmatch '(?m)^MATERIAL_PLATFORM_GUID_FIX=1$' -or
-        $markerText -notmatch '(?m)^GROUP_STAGING_HELPER=1$' -or
-        $markerText -notmatch '(?m)^AUTO_BLACK_TEXTURE_REPAIR_DISABLED=1$' -or
-        $markerText -notmatch '(?m)^SAFE_CTEXT_RGB_ONLY_REPAIR=1$' -or
-        $markerText -notmatch '(?m)^SECONDARY_MACRO_OVERLAY_REPAIR=1$' -or
-        $markerText -notmatch '(?m)^SELECTIVE_REFERENCED_LIGHTMAP_REPAIR=1$'
+        $markerText -notmatch '(?m)^MATERIAL_PLATFORM_GUID_FIX=1\r?$' -or
+        $markerText -notmatch '(?m)^GROUP_STAGING_HELPER=1\r?$' -or
+        $markerText -notmatch '(?m)^AUTO_BLACK_TEXTURE_REPAIR_DISABLED=1\r?$' -or
+        $markerText -notmatch '(?m)^SAFE_CTEXT_RGB_ONLY_REPAIR=1\r?$' -or
+        $markerText -notmatch '(?m)^SECONDARY_MACRO_OVERLAY_REPAIR=1\r?$' -or
+        $markerText -notmatch '(?m)^SELECTIVE_REFERENCED_LIGHTMAP_REPAIR=1\r?$' -or
+        $markerText -notmatch '(?m)^DEC3N_NORMAL_ARGB8_TEXTURE_SHARED_DIST=1\r?$'
     )
 
     if ($ForceToolchainRefresh) {
@@ -1350,7 +1402,7 @@ function Prepare-Toolchain {
 
     if ($needsV105Upgrade -and $sourceReposReady) {
         Write-Host ""
-        Write-Host "Upgrading the existing cached converter with v1.16 selective referenced-lightmap compatibility repair..." -ForegroundColor Cyan
+        Write-Host "Upgrading the existing cached converter with v1.17 fixes (dec3n normals, linear ARGB8 textures, multi-location worlds)..." -ForegroundColor Cyan
         # Start this upgrade from the pinned clean sources. Earlier importer
         # versions patched the shared cache in place, so a hard checkout avoids
         # carrying stale material/lightmap experiments into v1.16.
