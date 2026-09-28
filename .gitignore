@@ -1,0 +1,6 @@
+# local build output / scratch
+*.big
+X360-DIST/
+Recomp-Content/
+Location-Groups/
+Logs/

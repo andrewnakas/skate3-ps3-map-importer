@@ -1,4 +1,18 @@
-SKATE 3 PS3 -> XBOX 360 MAP IMPORTER v1.16
+SKATE 3 PS3 -> XBOX 360 MAP IMPORTER v1.17
+
+Full guide: docs\USAGE.md    History and credits: README.md, CONTRIBUTORS.md
+
+V1.17 NEW SAN VAN PASS
+----------------------
+- Fixed: the importer rebuilt its converter from scratch on EVERY run (the
+  toolchain marker's last line ends in CRLF and the check never matched it).
+  Updating to v1.17 upgrades the cache once; after that it is reused.
+- Converter: vertex normals packed as dec3n (VT6) now decode.
+- Converter: uncompressed linear A8R8G8B8 textures (0xA5) are re-encoded to DXT5.
+- The log lists every refused arena, grouped by reason.
+- Several Locations in one world: MAKE-LOCATIONS-FROM-LOC.bat /
+  Make-LocationGroupFromLoc.ps1 builds a Location group from the map's own
+  DIST_*_Sim.loc locators (e.g. New San Van's 45 F_* freeskate spots).
 
 V1.16 SELECTIVE REFERENCED-LIGHTMAP REPAIR
 -------------------------------------------
