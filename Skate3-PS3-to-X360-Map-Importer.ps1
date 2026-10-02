@@ -788,8 +788,6 @@ function Invoke-WorldRepairs([string]$DotNet, [string]$CliDll, [string]$WorldDir
     foreach ($step in $steps) {
         $stepLog = Join-Path $LogsDir ("world-repair-{0}.log" -f $step[0])
         Run-LoggedChecked $DotNet (@($CliDll) + $step) "World repair: $($step[0])" $stepLog
-        $summary = @(Get-Content -LiteralPath $stepLog -ErrorAction SilentlyContinue | Where-Object { $_ -match '\S' } | Select-Object -Last 1)
-        if ($summary.Count -gt 0) { Write-Host "  $($summary[0].Trim())" -ForegroundColor DarkGray }
         Get-Content -LiteralPath $stepLog -ErrorAction SilentlyContinue | Add-Content -LiteralPath $repairLog
         Remove-Item -LiteralPath $stepLog -Force -ErrorAction SilentlyContinue
     }
