@@ -780,7 +780,11 @@ function Invoke-WorldRepairs([string]$DotNet, [string]$CliDll, [string]$WorldDir
     if ($FixCollisionBoxes) {
         # Keep the original boxes with the logs, not in the world folder (which is packed whole).
         Get-ChildItem -LiteralPath $WorldDir -Filter "*_Sim.xss" -File |
-            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $LogsDir ($_.Name + ".orig")) -Force }
+            ForEach-Object {
+                # A re-run sees boxes that are already rewritten; never replace the saved original.
+                $saved = Join-Path $LogsDir ($_.Name + ".orig")
+                if (-not (Test-Path -LiteralPath $saved)) { Copy-Item -LiteralPath $_.FullName -Destination $saved }
+            }
         [void]$steps.Add(@("fix-collision-boxes", $WorldDir))
     }
 

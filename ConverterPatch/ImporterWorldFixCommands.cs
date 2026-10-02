@@ -276,7 +276,7 @@ public static class ImporterWorldFixCommands
         if (changed > 0) File.WriteAllBytes(xss, d);
         Console.WriteLine($"collision boxes: {changed} of {count} cells rewritten to their collision bounds"
                           + (skippedFirst > 0 ? $", first record left as the grid cell" : "")
-                          + (noCell > 0 ? $", {noCell} tile(s) had no cell" : "") + $" -> {Path.GetFileName(xss)}");
+                          + (noCell > 0 ? $", {noCell} tile(s) have no plain grid cell (already rewritten?)" : "") + $" -> {Path.GetFileName(xss)}");
         return 0;
     }
 
