@@ -1,6 +1,18 @@
-SKATE 3 PS3 -> XBOX 360 MAP IMPORTER v1.17
+SKATE 3 PS3 -> XBOX 360 MAP IMPORTER v1.18
 
 Full guide: docs\USAGE.md    History and credits: README.md, CONTRIBUTORS.md
+
+V1.18 FALLING THROUGH THE FLOOR / BLACK SURFACES
+------------------------------------------------
+- Stream tables: Import-WorldStreamTables.ps1 [-CompleteSim] extracts a map's authored
+  world stream tables from its .big; pass the folder with -WorldStreamDir. The importer
+  also writes them under the name the game really asks for (dist_<slug>dlc_Sim.xml).
+- -FixCollisionBoxes rewrites the Sim collection boxes to each tile's real collision.
+- Textures with a side <= 16 px no longer read back black (automatic).
+- Skate 2-only material families are repointed to Skate 3 ones (automatic).
+- -TextureDonorDirs "<dist>;<dist>" fills in textures the map's materials name but the
+  map does not ship, from the map's far tiles and from donor Xbox 360 worlds.
+- Logs\world-repairs.log records what each repair did. See docs\USAGE.md.
 
 V1.17 NEW SAN VAN PASS
 ----------------------

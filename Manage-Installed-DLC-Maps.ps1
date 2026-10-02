@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Engine = Join-Path $Here 'Skate3-PS3-to-X360-Map-Importer.ps1'
-$ManagerVersion = '1.17'
+$ManagerVersion = '1.18'
 $SharedXuid = '0000000000000000'
 $TitleId = '454108E6'
 $MarketplaceType = '00000002'

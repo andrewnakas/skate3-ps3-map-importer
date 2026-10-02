@@ -81,6 +81,29 @@ Done by andrewnakas with Claude while converting the **New San Van** RPCS3 mod, 
 Result: New San Van converts with 0 of 41,893 arenas refused and 0 model-validation findings, and it
 loads in the v0.1.5 level loader build.
 
+### 5. Playable New San Van: v1.18 (2026-10-01)
+
+Testers in the Discord reported two things in the v1.17 pack: falling through the ground from one
+direction but not the other, and whole walls and patches of ground drawn pure black. v1.18 fixes
+the causes in the importer, so a fresh conversion produces a correct world:
+
+- **Stream tables the game actually reads.** For a DLC Location the game asks for
+  `dist_<location slug>dlc_Sim.xml`, never `<World>_Sim.xml`, so replaced tables had no effect and
+  it streamed a bare 3x3 ring. The importer now writes the table under that name per Location, and
+  `Import-WorldStreamTables.ps1 -CompleteSim` takes the map's authored tables and adds every tile
+  whose collision reaches a centre tile, within a memory budget.
+- **Collision boxes.** `-FixCollisionBoxes` rewrites each tile's collection boxes to the collision
+  it really holds, which is what makes the game wait for ground that is not in yet.
+- **Small textures.** Textures with a side of 16 px or less were written in a layout that reads
+  back black. They are tints, grey swatches and lightmap pages multiplied over everything else.
+- **Skate 2 material families** are repointed to the Skate 3 family that draws the same thing.
+- **Missing textures.** `-TextureDonorDirs` copies textures the materials name but the map lacks
+  into every tile that uses them, from the world's own far tiles and from donor Xbox 360 worlds.
+
+Each repair was first proven as a script against the game, then ported into the converter and
+checked by converting New San Van from scratch: the result matches the script-repaired world arena
+for arena. See [docs/USAGE.md](docs/USAGE.md).
+
 ## Credits
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md). In short: **Dumbads (Ethanw05)** for ArenaBuilder and

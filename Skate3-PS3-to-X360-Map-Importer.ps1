@@ -18,13 +18,22 @@ param(
     [switch]$NonInteractive,
     [switch]$ForceToolchainRefresh,
     [switch]$KeepStaging,
-    [string]$RebuildGroupProject = ""
+    [string]$RebuildGroupProject = "",
+    # Folder of authored world stream tables (<DIST>_Pres.xml / <DIST>_Sim.xml) that replace
+    # the generated 3x3 neighbour tables. See Import-WorldStreamTables.ps1.
+    [string]$WorldStreamDir = "",
+    # Xbox 360 DIST folders (';'-separated) to take textures from when the map's materials name
+    # textures the map does not ship - e.g. the Skate 2 world and prop stream for a Skate 2 city.
+    [string]$TextureDonorDirs = "",
+    # Rewrite the Sim collection boxes to the collision each tile really holds. For worlds that
+    # file collision in blocks larger than a tile (falling through near tile edges).
+    [switch]$FixCollisionBoxes
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ImporterVersion = "1.17"
+$ImporterVersion = "1.18"
 $ToolchainCacheVersion = "1.00"
 $SafeAutomaticLightmapRepair = $false
 $LegacyFullLightmapNeutralizationDisabled = $true
@@ -705,6 +714,87 @@ function Make-DlcProductId([string]$Text) {
     return $alnum.PadRight(16, '0').Substring(0,16)
 }
 
+# The builder generates each world's stream table as a plain 3x3 neighbour ring. Large
+# worlds are authored with wider rings where big collision objects are stored in a tile two
+# away; with only 3x3 those tiles load only if you arrived from their side, so the skater
+# falls through in one direction and not the other. Copy authored tables over the generated
+# ones (only names the staging tree already has, so a stray file cannot add a world).
+function Apply-WorldStreamOverrides([string]$StagingData) {
+    if ([string]::IsNullOrWhiteSpace($WorldStreamDir)) { return }
+    if (-not (Test-Path -LiteralPath $WorldStreamDir -PathType Container)) { Fail "WorldStreamDir does not exist: $WorldStreamDir" }
+    $streamDir = Join-Path $StagingData "stream"
+    $replaced = 0
+    foreach ($xml in Get-ChildItem -LiteralPath $WorldStreamDir -Filter "*.xml" -File) {
+        $target = Join-Path $streamDir $xml.Name
+        if (-not (Test-Path -LiteralPath $target)) {
+            Write-Host "  world stream override skipped (no generated $($xml.Name) to replace)" -ForegroundColor DarkYellow
+            continue
+        }
+        Copy-Item -LiteralPath $xml.FullName -Destination $target -Force
+        $replaced++
+    }
+    if ($replaced -eq 0) { Fail "WorldStreamDir held no table matching this package's worlds." }
+    Write-Host "World stream tables: replaced $replaced generated table(s) with authored ones." -ForegroundColor Green
+
+    # The game never opens <World>_Sim.xml for a DLC Location. It asks for
+    # data\stream\dist_<location slug>dlc_Sim.xml (measured: NtCreateFile on that name, once per
+    # location change) and, finding none, streams a bare 3x3 ring - so the table replaced above
+    # had no effect in game. Ship each supplied table (Sim and, when given, Pres) under the name
+    # each Location requests. A Location's slug starts with its world id in lower case
+    # (DIST_New_San_Van -> new_san_van_<spot>), which is how a Location finds its world's table
+    # when a package holds several worlds; the longest matching world wins.
+    $worldTables = @(Get-ChildItem -LiteralPath $WorldStreamDir -Filter "*.xml" -File |
+        Where-Object { $_.BaseName -match '^DIST_(.+)_(Sim|Pres)$' -and (Test-Path -LiteralPath (Join-Path $streamDir $_.Name)) } |
+        ForEach-Object { [pscustomobject]@{ World = $Matches[1].ToLowerInvariant(); Kind = $Matches[2]; Path = $_.FullName } } |
+        Sort-Object { $_.World.Length } -Descending)
+    $perLocation = 0
+    foreach ($freeskate in Get-ChildItem -LiteralPath $streamDir -Filter "freeskate_dlc_*.xml" -File) {
+        $slug = $freeskate.BaseName.Substring("freeskate_dlc_".Length)
+        foreach ($kind in 'Sim', 'Pres') {
+            $table = $worldTables | Where-Object { $_.Kind -eq $kind -and $slug.StartsWith($_.World + '_') } | Select-Object -First 1
+            if ($null -eq $table) { continue }
+            Copy-Item -LiteralPath $table.Path -Destination (Join-Path $streamDir "dist_${slug}dlc_$kind.xml") -Force
+            $perLocation++
+        }
+    }
+    Write-Host "World stream tables: wrote $perLocation per-Location table(s)." -ForegroundColor Green
+}
+
+# Repairs applied to the converted world before it is validated, copied and packed.
+#  - Textures the materials name but no tile holds (or only a far tile holds) draw black:
+#    copy them into each tile that uses them, from the world itself and from donor worlds.
+#  - Skate 2-only material families resolve to no shader in Skate 3: repoint them. Always
+#    run; it does nothing on a map that has none.
+#  - Collection boxes that do not contain their tile's collision: opt-in (-FixCollisionBoxes).
+function Invoke-WorldRepairs([string]$DotNet, [string]$CliDll, [string]$WorldDir, [string]$LogsDir) {
+    $repairLog = Join-Path $LogsDir "world-repairs.log"
+    Remove-Item -LiteralPath $repairLog -Force -ErrorAction SilentlyContinue
+    $steps = New-Object System.Collections.ArrayList
+    if (-not [string]::IsNullOrWhiteSpace($TextureDonorDirs)) {
+        foreach ($donor in $TextureDonorDirs.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)) {
+            if (-not (Test-Path -LiteralPath $donor.Trim() -PathType Container)) { Fail "Texture donor folder does not exist: $donor" }
+        }
+        [void]$steps.Add(@("fill-missing-textures", $WorldDir, $TextureDonorDirs))
+    }
+    [void]$steps.Add(@("fix-material-families", $WorldDir))
+    if ($FixCollisionBoxes) {
+        # Keep the original boxes with the logs, not in the world folder (which is packed whole).
+        Get-ChildItem -LiteralPath $WorldDir -Filter "*_Sim.xss" -File |
+            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $LogsDir ($_.Name + ".orig")) -Force }
+        [void]$steps.Add(@("fix-collision-boxes", $WorldDir))
+    }
+
+    Write-Host "Repairing converted world..." -ForegroundColor Cyan
+    foreach ($step in $steps) {
+        $stepLog = Join-Path $LogsDir ("world-repair-{0}.log" -f $step[0])
+        Run-LoggedChecked $DotNet (@($CliDll) + $step) "World repair: $($step[0])" $stepLog
+        $summary = @(Get-Content -LiteralPath $stepLog -ErrorAction SilentlyContinue | Where-Object { $_ -match '\S' } | Select-Object -Last 1)
+        if ($summary.Count -gt 0) { Write-Host "  $($summary[0].Trim())" -ForegroundColor DarkGray }
+        Get-Content -LiteralPath $stepLog -ErrorAction SilentlyContinue | Add-Content -LiteralPath $repairLog
+        Remove-Item -LiteralPath $stepLog -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Update-LocationGroupProject(
     [string]$GroupDisplayName,
     [string]$OutputRootPath,
@@ -837,6 +927,7 @@ function Build-LocationGroupPackage(
     }
     $expectedProductId = Make-DlcProductId $Project.GroupName
     Write-Host "Group staging verified: ONE parent package -> $($childVlt.Count) child freeskate row(s)." -ForegroundColor Green
+    Apply-WorldStreamOverrides $StagingData
     Write-Host "Group manifest product_id/content folder: $expectedProductId" -ForegroundColor DarkGray
 
     # The grouped orchestrator writes fresh unlock files after the standalone map
@@ -1304,6 +1395,42 @@ function Apply-XboxConverterFixes([string]$ConverterRoot, [string]$BuilderRoot) 
         [System.IO.File]::WriteAllText($programPath, $program, (New-Object System.Text.UTF8Encoding($false)))
     }
 
+    # v1.18: extract a world's authored stream tables from a .big (Import-WorldStreamTables.ps1).
+    $worldStreamPatch = Join-Path $Here "ConverterPatch\ImporterWorldStreamCommand.cs"
+    if (-not (Test-Path $worldStreamPatch)) { Fail "Bundled converter patch is missing: $worldStreamPatch" }
+    Copy-Item -LiteralPath $worldStreamPatch -Destination (Join-Path $cliDir "ImporterWorldStreamCommand.cs") -Force
+    $program = ([System.IO.File]::ReadAllText($programPath)).Replace("`r`n", "`n")
+    if (-not $program.Contains('"extract-world-streams" => ImporterWorldStreamCommand.Run(')) {
+        $anchor = '        "build-group-staging" => ImporterGroupCommand.Run(args[1]),'
+        if (-not $program.Contains($anchor)) { Fail "Converter CLI is missing the build-group-staging entry." }
+        $program = $program.Replace($anchor, $anchor + "`n" +
+            '        "extract-world-streams" => ImporterWorldStreamCommand.Run(args[1], args[2], args[3]),')
+        [System.IO.File]::WriteAllText($programPath, $program, (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    # v1.18: world repair commands (missing textures, Skate 2 material families, collision
+    # boxes, completed Sim stream table). See docs\USAGE.md.
+    foreach ($patchName in 'ImporterTextureFillCommand.cs', 'ImporterWorldFixCommands.cs') {
+        $patchPath = Join-Path $Here "ConverterPatch\$patchName"
+        if (-not (Test-Path $patchPath)) { Fail "Bundled converter patch is missing: $patchPath" }
+        Copy-Item -LiteralPath $patchPath -Destination (Join-Path $cliDir $patchName) -Force
+    }
+    $program = ([System.IO.File]::ReadAllText($programPath)).Replace("`r`n", "`n")
+    if (-not $program.Contains('"fix-material-families" => ImporterWorldFixCommands.FixMaterialFamilies(')) {
+        $anchor = '        "build-group-staging" => ImporterGroupCommand.Run(args[1]),'
+        if (-not $program.Contains($anchor)) { Fail "Converter CLI is missing the build-group-staging entry." }
+        $entries = @(
+            '        "fill-missing-textures" => ImporterTextureFillCommand.Run(args[1], args[2]),',
+            '        "fix-material-families" => ImporterWorldFixCommands.FixMaterialFamilies(args[1]),',
+            '        "fix-collision-boxes" => ImporterWorldFixCommands.FixCollisionBoxes(args[1]),',
+            '        "complete-sim-table" => ImporterWorldFixCommands.CompleteSimTable(args[1], args[2], args[3],',
+            '            double.Parse(args[4], System.Globalization.CultureInfo.InvariantCulture),',
+            '            double.Parse(args[5], System.Globalization.CultureInfo.InvariantCulture)),'
+        )
+        $program = $program.Replace($anchor, $anchor + "`n" + ($entries -join "`n"))
+        [System.IO.File]::WriteAllText($programPath, $program, (New-Object System.Text.UTF8Encoding($false)))
+    }
+
     # v1.17: formats the New San Van world uses that the pinned converter refused.
     # 1) NORMAL elements packed as dec3n (VT6) — the same 11:11:10 packing the
     #    decoder already inverts for tangents.
@@ -1334,6 +1461,24 @@ function Apply-XboxConverterFixes([string]$ConverterRoot, [string]$BuilderRoot) 
         $texture = $texture.Replace($convertAnchor,
             "        if (info.Format == Ps3Argb8Linear)`n            (info, linearPayload) = Argb8LinearToDxt5(info, linearPayload);`n" + $convertAnchor)
         $snippet = ([System.IO.File]::ReadAllText($argbSnippet)).Replace("`r`n", "`n")
+        $texture = $texture.Replace($blockAnchor, $snippet + $blockAnchor)
+        [System.IO.File]::WriteAllText($texturePath, $texture, (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    # 2b) Textures with a side <= 16 px: the tiler's packed-mip form reads back black in game.
+    #     Store them as retail does (top level only, standard tiling).
+    $smallSnippet = Join-Path $Here "ConverterPatch\TextureSmallLayout.snippet.cs"
+    if (-not (Test-Path $smallSnippet)) { Fail "Bundled converter patch is missing: $smallSnippet" }
+    $texture = ([System.IO.File]::ReadAllText($texturePath)).Replace("`r`n", "`n")
+    if (-not $texture.Contains("SmallTextureLayout(")) {
+        $returnAnchor = "        return (XboxTextureInfoBuilder.Build(tiled.FetchConstant), tiled.TiledData);`n    }"
+        $blockAnchor = "    private static int BytesPerBlock(byte format) => format switch"
+        if (-not $texture.Contains($returnAnchor) -or -not $texture.Contains($blockAnchor)) {
+            Fail "Pinned TextureObjectConverter no longer matches the expected Convert return block."
+        }
+        $texture = $texture.Replace($returnAnchor,
+            "        return SmallTextureLayout(info, linearPayload, tiled.FetchConstant, tiled.TiledData);`n    }")
+        $snippet = ([System.IO.File]::ReadAllText($smallSnippet)).Replace("`r`n", "`n")
         $texture = $texture.Replace($blockAnchor, $snippet + $blockAnchor)
         [System.IO.File]::WriteAllText($texturePath, $texture, (New-Object System.Text.UTF8Encoding($false)))
     }
@@ -1370,6 +1515,8 @@ SAFE_CTEXT_RGB_ONLY_REPAIR=1
 SECONDARY_MACRO_OVERLAY_REPAIR=1
 SELECTIVE_REFERENCED_LIGHTMAP_REPAIR=1
 DEC3N_NORMAL_ARGB8_TEXTURE_SHARED_DIST=1
+WORLD_STREAM_TABLES=1
+WORLD_FIX_COMMANDS_SMALL_TEXTURES=1
 "@
     Set-Content -LiteralPath $ToolchainMarker -Value $markerText -Encoding ASCII
 }
@@ -1392,7 +1539,9 @@ function Prepare-Toolchain {
         $markerText -notmatch '(?m)^SAFE_CTEXT_RGB_ONLY_REPAIR=1\r?$' -or
         $markerText -notmatch '(?m)^SECONDARY_MACRO_OVERLAY_REPAIR=1\r?$' -or
         $markerText -notmatch '(?m)^SELECTIVE_REFERENCED_LIGHTMAP_REPAIR=1\r?$' -or
-        $markerText -notmatch '(?m)^DEC3N_NORMAL_ARGB8_TEXTURE_SHARED_DIST=1\r?$'
+        $markerText -notmatch '(?m)^DEC3N_NORMAL_ARGB8_TEXTURE_SHARED_DIST=1\r?$' -or
+        $markerText -notmatch '(?m)^WORLD_STREAM_TABLES=1\r?$' -or
+        $markerText -notmatch '(?m)^WORLD_FIX_COMMANDS_SMALL_TEXTURES=1\r?$'
     )
 
     if ($ForceToolchainRefresh) {
@@ -1402,7 +1551,7 @@ function Prepare-Toolchain {
 
     if ($needsV105Upgrade -and $sourceReposReady) {
         Write-Host ""
-        Write-Host "Upgrading the existing cached converter with v1.17 fixes (dec3n normals, linear ARGB8 textures, multi-location worlds)..." -ForegroundColor Cyan
+        Write-Host "Upgrading the existing cached converter with v1.18 fixes (dec3n normals, linear ARGB8 textures, multi-location worlds, world stream tables)..." -ForegroundColor Cyan
         # Start this upgrade from the pinned clean sources. Earlier importer
         # versions patched the shared cache in place, so a hard checkout avoids
         # carrying stale material/lightmap experiments into v1.16.
@@ -1695,6 +1844,8 @@ try {
     if (-not (Test-Path $stagingData)) { Fail "Converter produced no DLC staging tree at $stagingData" }
     $convertedWorldDir = Join-Path $stagingData "content\world\stream\$worldId"
     if (-not (Test-Path $convertedWorldDir)) { Fail "Converted Xbox 360 world folder was not created: $convertedWorldDir" }
+    Invoke-WorldRepairs $dotnet $cliDll $convertedWorldDir $logsDir
+    Apply-WorldStreamOverrides $stagingData
 
     Write-Host "Validating converted Xbox RenderModelData..." -ForegroundColor Cyan
     $validateLog = Join-Path $logsDir "model-validate.log"
